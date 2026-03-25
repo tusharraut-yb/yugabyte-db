@@ -4,8 +4,8 @@ ARG BASE_IMAGE=docker.io/library/almalinux:8
 # docker build --build-arg BASE_IMAGE=docker.io/library/almalinux:8
 # Use following command to create UBI-8 based docker image
 # docker build --build-arg BASE_IMAGE=registry.access.redhat.com/ubi8/ubi
-# Use following command to create UBI-9 based docker image
-# docker build --build-arg BASE_IMAGE=registry.access.redhat.com/ubi9/ubi
+# Use following command to create UBI-9 FIPS based docker image
+# docker build --build-arg BASE_IMAGE=quay.io/yugabyte/ubi9:ubi9-fips-rfcurated
 
 FROM $BASE_IMAGE as intermediate
 
@@ -57,7 +57,9 @@ WORKDIR $YB_HOME
 ARG yum_install="yum install --disableplugin=subscription-manager -y"
 ARG yum_upgrade="yum upgrade --disableplugin=subscription-manager -y"
 
-# Add the almalinux package repo if we are building for ubi8 or ubi9.
+# Add the appropriate AlmaLinux package repo depending on the base image.
+# - UBI8 variants: AlmaLinux 8 repos
+# - UBI9 FIPS (quay.io/yugabyte/ubi9) and standard UBI9: AlmaLinux 9 repos
 RUN <<EOF
   if [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi8"* ]]; then
     cat <<- "EOR" > /etc/yum.repos.d/almalinux8.repo
@@ -75,7 +77,8 @@ gpgcheck=1
 enabled=1
 gpgkey=https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux-8
 EOR
-  elif [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi9"* ]]; then
+  elif [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi9"* ]] || \
+       [[ "$BASE_IMAGE" == "quay.io/yugabyte/ubi9"* ]]; then
     cat <<- "EOR" > /etc/yum.repos.d/almalinux9.repo
 [almalinux9-appstream]
 name=Almalinux9-appstream
@@ -94,9 +97,11 @@ EOR
   fi
 EOF
 
-# Install hostname for ubi8/ubi9 images.
+# Install hostname for ubi8, standard ubi9, and yugabyte ubi9 FIPS images.
+# hostname is not included by default in any of these UBI variants.
 RUN if [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi8/ubi"* ]] || \
-       [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi9/ubi"* ]]; then \
+       [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi9/ubi"* ]] || \
+       [[ "$BASE_IMAGE" == "quay.io/yugabyte/ubi9"* ]]; then \
   $yum_install hostname; \
   fi
 
@@ -131,11 +136,12 @@ RUN $yum_install \
       which \
     && alternatives --set python3 /usr/bin/python3.11 \
     && alternatives --set python /usr/bin/python3.11 \
-    && python3 -m pip install --upgrade pip \
-    && python3 -m pip install --upgrade lxml \
-    && python3 -m pip install --upgrade s3cmd \
-    && python3 -m pip install --upgrade psutil \
-    && python3 -m pip install --upgrade watchdog \
+    # --no-cache-dir avoids hash-verification issues under FIPS-enforced OpenSSL
+    && python3 -m pip install --upgrade --no-cache-dir pip \
+    && python3 -m pip install --upgrade --no-cache-dir lxml \
+    && python3 -m pip install --upgrade --no-cache-dir s3cmd \
+    && python3 -m pip install --upgrade --no-cache-dir psutil \
+    && python3 -m pip install --upgrade --no-cache-dir watchdog \
     && rm -rf /usr/share/python3-wheels/pip-9.0.3-py2.py3-none-any.whl \
     && rm -rf ~/.cache \
     && yum clean all && rm -rf /var/cache/yum
@@ -147,13 +153,17 @@ RUN set -x; \
       localedef --quiet --force --inputfile="${lang}" --charmap=UTF-8 "${lang}.UTF-8"; \
     done
 
+# Create the yugabyte user for all UBI-based images (both Red Hat registry and quay.io/yugabyte).
+# The '|| id yugabyte' fallback is a no-op guard in case the user already exists in the base image.
 RUN set -x; \
-    if [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi"* ]]; then \
+    if [[ "$BASE_IMAGE" == "registry.access.redhat.com/ubi"* ]] || \
+       [[ "$BASE_IMAGE" == "quay.io/yugabyte/ubi9"* ]]; then \
       useradd --home-dir $YB_HOME \
               --uid 10001 \
               --shell /sbin/nologin \
               --no-create-home \
-              --no-user-group yugabyte; \
+              --no-user-group yugabyte \
+      || id yugabyte; \
     fi
 
 COPY --from=intermediate $YB_HOME $YB_HOME
